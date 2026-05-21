@@ -1,7 +1,7 @@
 // TODO: When finished configure features (server, client)
 
-#[cfg(feature="server")]
+#[cfg(feature = "server")]
 pub mod server;
 
-#[cfg(feature="client")]
+#[cfg(feature = "client")]
 pub mod client;
