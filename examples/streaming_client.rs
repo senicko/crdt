@@ -8,7 +8,7 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::transport::Channel;
 
 use pb::{
-    BidirectionalStreamingEchoRequest, ServerStreamingEchoRequest, UnaryEchoRequest,
+    BidirectionalStreamingEchoRequest, ServerStreamingEchoRequest,
     echo_service_client::EchoServiceClient,
 };
 
@@ -78,9 +78,7 @@ async fn bidirectional_streaming_echo_throttle(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let mut client = EchoServiceClient::connect("http://[::1]:50051")
-        .await
-        .unwrap();
+    let mut client = EchoServiceClient::connect("http://[::1]:50051").await?;
 
     println!("Streaming echo:");
     streaming_echo(&mut client, 5).await;
