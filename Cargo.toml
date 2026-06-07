@@ -4,9 +4,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+h2 = "0.4.14"
+prost = "0.14.3"
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }
+tokio-stream = { version = "0.1.18", features = ["sync"] }
+uuid = {version = "1.23.1", features = ["v4"]}
+tonic = "0.14.6"
+tonic-prost = "*"
 
 [features]
 default = []
 server = []
 client = []
 full = ["server", "client"]
+
+[build-dependencies]
+tonic-prost-build = "*"

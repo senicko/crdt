@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package broadcaster.v1;
+
+message PingRequest {
+  int64 value = 1;
+}
+
+message PingResponse {
+  int64 value = 1;
+}
+
+service BroadcasterService {
+  rpc Ping(stream PingRequest) returns (stream PingResponse);
+}
