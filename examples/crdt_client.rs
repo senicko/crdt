@@ -1,12 +1,12 @@
+use crate::pb::{SyncRequest, g_counter_service_client::GCounterServiceClient};
 use bincode;
 use clap::{Parser, ValueEnum};
-use clap_repl::ClapEditor;
-use clap_repl::reedline::DefaultPrompt;
+use clap_repl::reedline::{DefaultPrompt, Reedline, Signal};
 use crdt::crdt::Crdt;
-use crdt::crdt::enums::CrdtState;
 use crdt::crdt::g_counter::{GCounter, GCounterReplica};
 use crdt::crdt::lww_set::{LWWBias, LWWSetReplica};
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::{
     error::Error,
     // TODO: Difference between tokio Mutex and std Mutex
@@ -18,30 +18,83 @@ use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::transport::Channel;
 use uhlc::HLC;
 
-use crate::pb::{SyncRequest, g_counter_service_client::GCounterServiceClient};
-
 pub mod pb {
     tonic::include_proto!("crdt.v1");
 }
 
 #[derive(Debug, Clone, ValueEnum)]
-enum CrdtType {
+pub enum CrdtType {
     GCounter,
     LWWSet,
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "")]
-enum Command {
+#[command(no_binary_name = true)]
+pub enum GlobalCommand {
     New { name: String, crdt_type: CrdtType },
-    Value { name: String },
-    Inc { name: String },
-    Add { name: String, element: String },
-    Remove { name: String, element: String },
     Vars,
     Connect,
     Disconnect,
     Quit,
+}
+
+#[derive(Debug, Parser)]
+#[command(no_binary_name = true)]
+pub enum GCounterCmd {
+    Inc,
+    Value,
+}
+
+#[derive(Debug, Parser)]
+#[command(no_binary_name = true)]
+pub enum LWWSetCmd {
+    Add { element: String },
+    Remove { element: String },
+    Value,
+}
+
+// Used on the client side to handle repl commands
+// TODO: Figure out if we can use just one enum instead of two similar
+pub enum CrdtState {
+    GCounter(GCounterReplica),
+    LWWSet(LWWSetReplica<String>),
+}
+
+impl Display for CrdtState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CrdtState::GCounter(_) => write!(f, "GCounter"),
+            CrdtState::LWWSet(_) => write!(f, "LWWSet"),
+        }
+    }
+}
+
+impl CrdtState {
+    pub fn execute(&mut self, args: &[&str]) {
+        match self {
+            CrdtState::GCounter(counter) => match GCounterCmd::try_parse_from(args) {
+                Ok(GCounterCmd::Inc) => {
+                    counter.inc(1);
+                }
+                Ok(GCounterCmd::Value) => println!("Counter Value: {}", counter.value()),
+                Err(e) => {
+                    let _ = e.print();
+                }
+            },
+            CrdtState::LWWSet(set) => match LWWSetCmd::try_parse_from(args) {
+                Ok(LWWSetCmd::Add { element }) => {
+                    set.add(element);
+                }
+                Ok(LWWSetCmd::Remove { element }) => {
+                    set.remove(element);
+                }
+                Ok(LWWSetCmd::Value) => println!("Set Members: {:#?}", set.members()),
+                Err(e) => {
+                    let _ = e.print();
+                }
+            },
+        }
+    }
 }
 
 async fn handle_connection(
@@ -97,153 +150,116 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // let mut active_tx: Option<mpsc::Sender<SyncRequest>> = Some(tx);
     // let mut active_connection_handle: Option<JoinHandle<()>> = Some(connection_handle);
 
-    let prompt = DefaultPrompt {
-        ..DefaultPrompt::default()
-    };
+    let mut line_editor = Reedline::create();
+    let prompt = DefaultPrompt::default();
 
-    let rl = ClapEditor::<Command>::builder()
-        .with_prompt(Box::new(prompt))
-        .build();
+    loop {
+        let sig = line_editor.read_line(&prompt);
 
-    rl.repl(|command| match command {
-        Command::New { name, crdt_type } => {
-            //Create a new variable with name
-            let mut state_map = state_map.lock().unwrap();
+        match sig {
+            Ok(Signal::Success(buffer)) => {
+                let tokens: Vec<&str> = buffer.split_whitespace().collect();
+                if tokens.is_empty() {
+                    continue;
+                }
 
-            //If we want variables to be mutable, we need to get rid of this check
-            if let Some(_) = state_map.get(&name) {
-                eprintln!("Structure with name: {} already exists", &name);
-                return;
-            }
+                // First we assume the command is a global command.
 
-            let new_crdt = match crdt_type {
-                CrdtType::GCounter => CrdtState::GCounter(GCounterReplica::new()),
-                CrdtType::LWWSet => CrdtState::LWWSet(LWWSetReplica::<String>::new(
-                    Arc::new(HLC::default()),
-                    LWWBias::Add,
-                )),
-            };
+                if let Ok(global_cmd) = GlobalCommand::try_parse_from(&tokens) {
+                    match global_cmd {
+                        GlobalCommand::New { name, crdt_type } => {
+                            let mut map = state_map.lock().unwrap();
 
-            state_map.insert(name, new_crdt);
+                            if map.contains_key(&name) {
+                                eprintln!("name is {} already taken", name);
+                                continue;
+                            }
 
-            //TODO: Broadcast CRDT structure creation to all users
-        }
-        //TODO: Refactor commands beneath avoid repeating code (closure?)
-        Command::Inc { name } => {
-            let mut state_map = state_map.lock().unwrap();
+                            let new_crdt = match crdt_type {
+                                CrdtType::GCounter => CrdtState::GCounter(GCounterReplica::new()),
+                                CrdtType::LWWSet => {
+                                    CrdtState::LWWSet(LWWSetReplica::<String>::new(
+                                        Arc::new(HLC::default()),
+                                        LWWBias::Add,
+                                    ))
+                                }
+                            };
 
-            match state_map.get_mut(&name) {
-                Some(crdt) => {
-                    if let Err(e) = crdt.try_inc(1) {
-                        eprintln!("{}", e);
+                            map.insert(name, new_crdt);
+                        }
+                        GlobalCommand::Vars => {
+                            let map = state_map.lock().unwrap();
+
+                            for (name, crdt) in map.iter() {
+                                println!("{}: {}", name, crdt);
+                            }
+                        }
+                        GlobalCommand::Connect => {
+                            // if active_connection_handle.is_some() {
+                            //     return;
+                            // }
+
+                            // let (tx, connection_handle) = establish_connection(state.clone());
+                            // active_tx = Some(tx);
+                            // active_connection_handle = Some(connection_handle);
+
+                            // let state = state.lock().unwrap();
+
+                            // let crdt_bytes = match bincode::serialize(&state.crdt) {
+                            //     Ok(crdt_bytes) => crdt_bytes,
+                            //     Err(e) => {
+                            //         eprintln!("Failed to serialize CRDT: {}", e);
+                            //         return;
+                            //     }
+                            // };
+
+                            // if let Some(tx) = &active_tx {
+                            //     let tx_clone = tx.clone();
+
+                            //     tokio::spawn(async move {
+                            //         if let Err(e) = tx_clone.send(SyncRequest { crdt_bytes }).await
+                            //         {
+                            //             eprintln!("Failed to send request to handler: {}", e);
+                            //         }
+                            //     });
+                            // }
+                        }
+                        GlobalCommand::Disconnect => {
+                            // if let Some(handle) = active_connection_handle.take() {
+                            //     handle.abort();
+                            //     active_tx = None;
+                            // }
+                        }
+                        GlobalCommand::Quit => break,
                     }
+
+                    continue;
                 }
-                None => eprintln!("Structure with name: {} doesn't extist", name),
-            }
 
-            //TODO: Refactor to broadcast G-counter incrementation to all users
+                // If it's not, we check if there is a variable with such a name.
 
-            // let crdt_bytes = match bincode::serialize(&state.crdt) {
-            //     Ok(crdt_bytes) => crdt_bytes,
-            //     Err(e) => {
-            //         eprintln!("Failed to serialize CRDT: {}", e);
-            //         return;
-            //     }
-            // };
+                let first_word = tokens[0];
+                let mut map = state_map.lock().unwrap();
 
-            // // TODO: Why there is &
-            // if let Some(tx) = &active_tx {
-            //     let tx_clone = tx.clone();
-
-            //     tokio::spawn(async move {
-            //         if let Err(e) = tx_clone.send(SyncRequest { crdt_bytes }).await {
-            //             eprintln!("Failed to send request to handler: {}", e);
-            //         }
-            //     });
-            // }
-        }
-        Command::Add { name, element } => {
-            let mut state_map = state_map.lock().unwrap();
-
-            match state_map.get_mut(&name) {
-                Some(crdt) => {
-                    if let Err(e) = crdt.try_add(element) {
-                        eprintln!("{}", e);
-                    }
+                if let Some(crdt) = map.get_mut(first_word) {
+                    let args = &tokens[1..];
+                    crdt.execute(args);
+                    break;
                 }
-                None => eprintln!("Structure with name: {} doesn't extist", name),
+
+                // If nothing worked, show an error.
+
+                eprintln!("unknown command or variable")
             }
-
-            //TODO: Work on broadcasting the set
-        }
-        Command::Remove { name, element } => {
-            let mut state_map = state_map.lock().unwrap();
-
-            match state_map.get_mut(&name) {
-                Some(crdt) => {
-                    if let Err(e) = crdt.try_remove(element) {
-                        eprintln!("{}", e);
-                    }
-                }
-                None => eprintln!("Structure with name: {} doesn't extist", name),
+            Ok(Signal::CtrlD) | Ok(Signal::CtrlC) => {
+                break;
             }
-            //TODO: Work on broadcasting the set
-        }
-        Command::Value { name } => {
-            let state_map = state_map.lock().unwrap();
-
-            match state_map.get(&name) {
-                Some(crdt) => {
-                    crdt.value();
-                }
-                None => eprintln!("Structure with name: {} doesn't extist", name),
+            Err(err) => {
+                eprintln!("error: {:?}", err);
+                break;
             }
         }
-
-        Command::Vars => {
-            let state_map = state_map.lock().unwrap();
-
-            for (name, crdt) in state_map.iter() {
-                println!("{}: {}", name, crdt);
-            }
-        }
-        Command::Connect => {
-            // if active_connection_handle.is_some() {
-            //     return;
-            // }
-
-            // let (tx, connection_handle) = establish_connection(state.clone());
-            // active_tx = Some(tx);
-            // active_connection_handle = Some(connection_handle);
-
-            // let state = state.lock().unwrap();
-
-            // let crdt_bytes = match bincode::serialize(&state.crdt) {
-            //     Ok(crdt_bytes) => crdt_bytes,
-            //     Err(e) => {
-            //         eprintln!("Failed to serialize CRDT: {}", e);
-            //         return;
-            //     }
-            // };
-
-            // if let Some(tx) = &active_tx {
-            //     let tx_clone = tx.clone();
-
-            //     tokio::spawn(async move {
-            //         if let Err(e) = tx_clone.send(SyncRequest { crdt_bytes }).await {
-            //             eprintln!("Failed to send request to handler: {}", e);
-            //         }
-            //     });
-            // }
-        }
-        Command::Disconnect => {
-            // if let Some(handle) = active_connection_handle.take() {
-            //     handle.abort();
-            //     active_tx = None;
-            // }
-        }
-        Command::Quit => return,
-    });
+    }
 
     Ok(())
 }
