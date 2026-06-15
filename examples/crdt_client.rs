@@ -1,10 +1,12 @@
 use bincode;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use clap_repl::ClapEditor;
 use clap_repl::reedline::DefaultPrompt;
 use crdt::crdt::Crdt;
+use crdt::crdt::enums::CrdtState;
 use crdt::crdt::g_counter::{GCounter, GCounterReplica};
-use std::collections::{HashMap, hash_map};
+use crdt::crdt::lww_set::{LWWBias, LWWSetReplica};
+use std::collections::HashMap;
 use std::{
     error::Error,
     // TODO: Difference between tokio Mutex and std Mutex
@@ -14,6 +16,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinHandle;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::transport::Channel;
+use uhlc::HLC;
 
 use crate::pb::{SyncRequest, g_counter_service_client::GCounterServiceClient};
 
@@ -21,12 +24,21 @@ pub mod pb {
     tonic::include_proto!("crdt.v1");
 }
 
+#[derive(Debug, Clone, ValueEnum)]
+enum CrdtType {
+    GCounter,
+    LWWSet,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "")]
 enum Command {
-    New { name: String },
+    New { name: String, crdt_type: CrdtType },
     Value { name: String },
     Inc { name: String },
+    Add { name: String, element: String },
+    Remove { name: String, element: String },
+    Vars,
     Connect,
     Disconnect,
     Quit,
@@ -79,9 +91,7 @@ fn establish_connection(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let state = Arc::new(Mutex::new(GCounterReplica::new()));
-
-    let state_map = Arc::new(Mutex::new(HashMap::<String, GCounterReplica>::new()));
+    let state_map = Arc::new(Mutex::new(HashMap::<String, CrdtState>::new()));
 
     // let (tx, connection_handle) = establish_connection(state.clone());
     // let mut active_tx: Option<mpsc::Sender<SyncRequest>> = Some(tx);
@@ -96,19 +106,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .build();
 
     rl.repl(|command| match command {
-        Command::New { name } => {
+        Command::New { name, crdt_type } => {
             //Create a new variable with name
             let mut state_map = state_map.lock().unwrap();
-            state_map.insert(name, GCounterReplica::new());
+
+            //If we want variables to be mutable, we need to get rid of this check
+            if let Some(_) = state_map.get(&name) {
+                eprintln!("Structure with name: {} already exists", &name);
+                return;
+            }
+
+            let new_crdt = match crdt_type {
+                CrdtType::GCounter => CrdtState::GCounter(GCounterReplica::new()),
+                CrdtType::LWWSet => CrdtState::LWWSet(LWWSetReplica::<String>::new(
+                    Arc::new(HLC::default()),
+                    LWWBias::Add,
+                )),
+            };
+
+            state_map.insert(name, new_crdt);
 
             //TODO: Broadcast CRDT structure creation to all users
         }
+        //TODO: Refactor commands beneath avoid repeating code (closure?)
         Command::Inc { name } => {
             let mut state_map = state_map.lock().unwrap();
 
             match state_map.get_mut(&name) {
                 Some(crdt) => {
-                    crdt.inc(1);
+                    if let Err(e) = crdt.try_inc(1) {
+                        eprintln!("{}", e);
+                    }
                 }
                 None => eprintln!("Structure with name: {} doesn't extist", name),
             }
@@ -134,14 +162,49 @@ async fn main() -> Result<(), Box<dyn Error>> {
             //     });
             // }
         }
-        Command::Value { name } => {
+        Command::Add { name, element } => {
             let mut state_map = state_map.lock().unwrap();
 
             match state_map.get_mut(&name) {
                 Some(crdt) => {
-                    println!("{}", crdt.value());
+                    if let Err(e) = crdt.try_add(element) {
+                        eprintln!("{}", e);
+                    }
                 }
                 None => eprintln!("Structure with name: {} doesn't extist", name),
+            }
+
+            //TODO: Work on broadcasting the set
+        }
+        Command::Remove { name, element } => {
+            let mut state_map = state_map.lock().unwrap();
+
+            match state_map.get_mut(&name) {
+                Some(crdt) => {
+                    if let Err(e) = crdt.try_remove(element) {
+                        eprintln!("{}", e);
+                    }
+                }
+                None => eprintln!("Structure with name: {} doesn't extist", name),
+            }
+            //TODO: Work on broadcasting the set
+        }
+        Command::Value { name } => {
+            let state_map = state_map.lock().unwrap();
+
+            match state_map.get(&name) {
+                Some(crdt) => {
+                    crdt.value();
+                }
+                None => eprintln!("Structure with name: {} doesn't extist", name),
+            }
+        }
+
+        Command::Vars => {
+            let state_map = state_map.lock().unwrap();
+
+            for (name, crdt) in state_map.iter() {
+                println!("{}: {}", name, crdt);
             }
         }
         Command::Connect => {
