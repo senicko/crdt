@@ -25,3 +25,11 @@ full = ["server", "client"]
 
 [build-dependencies]
 tonic-prost-build = "*"
+
+[[example]]
+name = "crdt_server"
+required-features = ["server"]
+
+[[example]]
+name = "crdt_client"
+required-features = ["client"]
