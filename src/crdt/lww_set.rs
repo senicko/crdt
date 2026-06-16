@@ -107,8 +107,8 @@ pub struct LWWSetReplica<T>
 where
     T: Eq + Hash + Clone,
 {
-    hlc: Arc<HLC>,
-    pub lww_set: LWWSet<T>,
+    pub hlc: Arc<HLC>,
+    pub crdt: LWWSet<T>,
 }
 
 impl<T> LWWSetReplica<T>
@@ -118,22 +118,22 @@ where
     pub fn new(hlc: Arc<HLC>, bias: LWWBias) -> Self {
         LWWSetReplica {
             hlc,
-            lww_set: LWWSet::new(bias),
+            crdt: LWWSet::new(bias),
         }
     }
 
     pub fn add(&mut self, element: T) {
         let ts = self.hlc.new_timestamp();
-        self.lww_set.add(element, ts);
+        self.crdt.add(element, ts);
     }
 
     pub fn remove(&mut self, element: T) {
         let ts = self.hlc.new_timestamp();
-        self.lww_set.remove(element, ts);
+        self.crdt.remove(element, ts);
     }
 
     pub fn members(&self) -> HashSet<T> {
-        self.lww_set.members()
+        self.crdt.members()
     }
 }
 
@@ -144,7 +144,7 @@ where
     type Struct = LWWSet<T>;
 
     fn merge(&mut self, other: &Self::Struct) {
-        self.lww_set.merge(other)
+        self.crdt.merge(other)
     }
 }
 
@@ -280,7 +280,7 @@ mod tests {
         assert!(replica1.members().contains(&100));
         assert!(!replica1.members().contains(&200));
 
-        replica1.merge(&replica2.lww_set);
+        replica1.merge(&replica2.crdt);
 
         let merged_members = replica1.members();
 

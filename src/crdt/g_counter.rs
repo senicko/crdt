@@ -38,16 +38,22 @@ impl Crdt for GCounter {
 
 #[derive(Debug)]
 pub struct GCounterReplica {
-    id: String,
+    pub id: String,
     pub crdt: GCounter,
+}
+
+impl Default for GCounterReplica {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            crdt: GCounter::new(),
+        }
+    }
 }
 
 impl GCounterReplica {
     pub fn new() -> Self {
-        GCounterReplica {
-            id: Uuid::new_v4().to_string(),
-            crdt: GCounter::new(),
-        }
+        Self::default()
     }
 
     pub fn inc(&mut self, delta: u64) {

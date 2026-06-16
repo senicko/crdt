@@ -4,17 +4,17 @@ package crdt.v1;
 
 import "google/protobuf/empty.proto";
 
-message SyncRequest {
-  bytes crdt_bytes = 1;
-}
+// message SyncRequest {
+//   bytes crdt_bytes = 1;
+// }
 
-message SyncResponse {
-  bytes crdt_bytes = 1;
-}
+// message SyncResponse {
+//   bytes crdt_bytes = 1;
+// }
 
-service GCounterService {
-  rpc Sync(stream SyncRequest) returns (stream SyncResponse);
-}
+// service GCounterService {
+//   rpc Sync(stream SyncRequest) returns (stream SyncResponse);
+// }
 
 /*
 
@@ -25,7 +25,8 @@ service GCounterService {
 */
 
 message CreateVariableRequest {
-  bytes crdt_bytes = 1;
+  string var = 1;
+  bytes crdt_bytes = 2;
 }
 
 message SyncStreamRequest {
