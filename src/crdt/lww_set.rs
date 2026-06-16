@@ -8,7 +8,7 @@ use std::{
 use uhlc::{HLC, Timestamp};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum LwwBias {
+pub enum LWWBias {
     Remove,
     Add,
 }
@@ -18,7 +18,7 @@ pub struct LWWSet<T>
 where
     T: Eq + Hash,
 {
-    bias: LwwBias,
+    bias: LWWBias,
     add_set: HashMap<T, Timestamp>,
     remove_set: HashMap<T, Timestamp>,
 }
@@ -27,7 +27,7 @@ impl<T> LWWSet<T>
 where
     T: Eq + Hash,
 {
-    pub fn new(bias: LwwBias) -> Self {
+    pub fn new(bias: LWWBias) -> Self {
         LWWSet {
             bias,
             add_set: HashMap::new(),
@@ -49,8 +49,8 @@ where
 
         match (add_ts, remove_ts) {
             (Some(add_time), Some(remove_time)) => match self.bias {
-                LwwBias::Add => add_time >= remove_time,
-                LwwBias::Remove => add_time > remove_time,
+                LWWBias::Add => add_time >= remove_time,
+                LWWBias::Remove => add_time > remove_time,
             },
             (Some(_), None) => true,
             _ => false,
@@ -107,33 +107,33 @@ pub struct LWWSetReplica<T>
 where
     T: Eq + Hash + Clone,
 {
-    hlc: Arc<HLC>,
-    pub lww_set: LWWSet<T>,
+    pub hlc: Arc<HLC>,
+    pub crdt: LWWSet<T>,
 }
 
 impl<T> LWWSetReplica<T>
 where
     T: Eq + Hash + Clone,
 {
-    pub fn new(hlc: Arc<HLC>, bias: LwwBias) -> Self {
+    pub fn new(hlc: Arc<HLC>, bias: LWWBias) -> Self {
         LWWSetReplica {
             hlc,
-            lww_set: LWWSet::new(bias),
+            crdt: LWWSet::new(bias),
         }
     }
 
     pub fn add(&mut self, element: T) {
         let ts = self.hlc.new_timestamp();
-        self.lww_set.add(element, ts);
+        self.crdt.add(element, ts);
     }
 
     pub fn remove(&mut self, element: T) {
         let ts = self.hlc.new_timestamp();
-        self.lww_set.remove(element, ts);
+        self.crdt.remove(element, ts);
     }
 
     pub fn members(&self) -> HashSet<T> {
-        self.lww_set.members()
+        self.crdt.members()
     }
 }
 
@@ -144,7 +144,7 @@ where
     type Struct = LWWSet<T>;
 
     fn merge(&mut self, other: &Self::Struct) {
-        self.lww_set.merge(other)
+        self.crdt.merge(other)
     }
 }
 
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_add_and_is_member() {
-        let mut set = LWWSet::new(LwwBias::Add);
+        let mut set = LWWSet::new(LWWBias::Add);
         let hlc = HLC::default();
 
         let ts = hlc.new_timestamp();
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_remove_higher_timestamp() {
-        let mut set = LWWSet::new(LwwBias::Add);
+        let mut set = LWWSet::new(LWWBias::Add);
         let hlc = HLC::default();
 
         let ts1 = hlc.new_timestamp();
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_add_higher_timestamp() {
-        let mut set = LWWSet::new(LwwBias::Add);
+        let mut set = LWWSet::new(LWWBias::Add);
         let hlc = HLC::default();
 
         let ts1 = hlc.new_timestamp();
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_add_bias_resolution() {
-        let mut set = LWWSet::new(LwwBias::Add);
+        let mut set = LWWSet::new(LWWBias::Add);
         let hlc = HLC::default();
 
         let ts = hlc.new_timestamp();
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn test_remove_bias_resolution() {
-        let mut set = LWWSet::new(LwwBias::Remove);
+        let mut set = LWWSet::new(LWWBias::Remove);
         let hlc = HLC::default();
 
         let ts = hlc.new_timestamp();
@@ -232,8 +232,8 @@ mod tests {
 
     #[test]
     fn test_merge_disjoint_sets() {
-        let mut set1 = LWWSet::new(LwwBias::Add);
-        let mut set2 = LWWSet::new(LwwBias::Add);
+        let mut set1 = LWWSet::new(LWWBias::Add);
+        let mut set2 = LWWSet::new(LWWBias::Add);
         let hlc = HLC::default();
 
         set1.add(1, hlc.new_timestamp());
@@ -249,8 +249,8 @@ mod tests {
 
     #[test]
     fn test_merge_conflict_resolution() {
-        let mut set1 = LWWSet::new(LwwBias::Add);
-        let mut set2 = LWWSet::new(LwwBias::Add);
+        let mut set1 = LWWSet::new(LWWBias::Add);
+        let mut set2 = LWWSet::new(LWWBias::Add);
         let hlc = HLC::default();
 
         let ts_early = hlc.new_timestamp();
@@ -271,8 +271,8 @@ mod tests {
         let hlc1 = Arc::new(HLC::default());
         let hlc2 = Arc::new(HLC::default());
 
-        let mut replica1 = LWWSetReplica::new(hlc1, LwwBias::Remove);
-        let mut replica2 = LWWSetReplica::new(hlc2, LwwBias::Remove);
+        let mut replica1 = LWWSetReplica::new(hlc1, LWWBias::Remove);
+        let mut replica2 = LWWSetReplica::new(hlc2, LWWBias::Remove);
 
         replica1.add(100);
         replica2.add(200);
@@ -280,7 +280,7 @@ mod tests {
         assert!(replica1.members().contains(&100));
         assert!(!replica1.members().contains(&200));
 
-        replica1.merge(&replica2.lww_set);
+        replica1.merge(&replica2.crdt);
 
         let merged_members = replica1.members();
 
