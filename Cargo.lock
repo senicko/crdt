@@ -315,6 +315,7 @@ dependencies = [
  "h2",
  "prost",
  "serde",
+ "shlex 2.0.1",
  "tokio",
  "tokio-stream",
  "tonic",
