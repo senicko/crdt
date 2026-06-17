@@ -3,6 +3,8 @@ use crate::crdt::{
     enums::{AnyCrdt, AnyReplica},
     g_counter::GCounterReplica,
     lww_set::{LWWBias, LWWSetReplica},
+    or_set::ORSetReplica,
+    rga::RGAReplica,
 };
 use crate::pb::{CreateVariableRequest, SyncStreamRequest, crdt_service_client::CrdtServiceClient};
 use std::collections::{HashMap, HashSet, hash_map::Entry};
@@ -46,6 +48,7 @@ type SyncTx = Arc<Mutex<Option<mpsc::Sender<SyncCommand>>>>;
 pub enum SharedVariable {
     Counter(SharedCounter),
     Set(SharedSet),
+    Array(SharedArray),
 }
 
 #[derive(Clone)]
@@ -100,9 +103,11 @@ impl SharedSet {
         let crdt = {
             let mut state = self.state.lock().unwrap();
 
-            if let Some(AnyReplica::LWWSet(replica)) = state.get_mut(&self.name) {
-                replica.add(element);
-            }
+            match state.get_mut(&self.name) {
+                Some(AnyReplica::LWWSet(replica)) => replica.add(element),
+                Some(AnyReplica::ORSet(replica)) => replica.add(element),
+                _ => {}
+            };
 
             state.get(&self.name).map(|r| r.as_any_crdt())
         };
@@ -121,9 +126,11 @@ impl SharedSet {
         let crdt = {
             let mut state = self.state.lock().unwrap();
 
-            if let Some(AnyReplica::LWWSet(replica)) = state.get_mut(&self.name) {
-                replica.remove(element);
-            }
+            match state.get_mut(&self.name) {
+                Some(AnyReplica::LWWSet(replica)) => replica.remove(&element),
+                Some(AnyReplica::ORSet(replica)) => replica.remove(&element),
+                _ => {}
+            };
 
             state.get(&self.name).map(|r| r.as_any_crdt())
         };
@@ -141,10 +148,75 @@ impl SharedSet {
     pub fn members(&self) -> HashSet<String> {
         let state = self.state.lock().unwrap();
 
-        if let Some(AnyReplica::LWWSet(r)) = state.get(&self.name) {
-            r.members()
+        match state.get(&self.name) {
+            Some(AnyReplica::LWWSet(replica)) => replica.members(),
+            Some(AnyReplica::ORSet(replica)) => replica.members(),
+            _ => HashSet::<String>::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SharedArray {
+    name: String,
+    state: State,
+    sync_tx: SyncTx,
+}
+
+impl SharedArray {
+    pub fn insert(&self, after_id: Option<String>, value: String) -> Option<String> {
+        let (crdt, id) = {
+            let mut state = self.state.lock().unwrap();
+
+            let id = if let Some(AnyReplica::RGA(replica)) = state.get_mut(&self.name) {
+                Some(replica.insert(after_id, value))
+            } else {
+                None
+            };
+
+            let crdt = state.get(&self.name).map(|r| r.as_any_crdt());
+            (crdt, id)
+        };
+
+        if let Some(crdt) = crdt {
+            if let Some(sync_tx) = self.sync_tx.lock().unwrap().as_ref() {
+                let _ = sync_tx.try_send(SyncCommand::Push {
+                    name: self.name.clone(),
+                    crdt,
+                });
+            }
+        }
+        id
+    }
+
+    pub fn remove(&self, id: String) {
+        let crdt = {
+            let mut state = self.state.lock().unwrap();
+
+            if let Some(AnyReplica::RGA(replica)) = state.get_mut(&self.name) {
+                replica.remove(&id);
+            }
+
+            state.get(&self.name).map(|r| r.as_any_crdt())
+        };
+
+        if let Some(crdt) = crdt {
+            if let Some(sync_tx) = self.sync_tx.lock().unwrap().as_ref() {
+                let _ = sync_tx.try_send(SyncCommand::Push {
+                    name: self.name.clone(),
+                    crdt,
+                });
+            }
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<(String, String)> {
+        let state = self.state.lock().unwrap();
+
+        if let Some(AnyReplica::RGA(r)) = state.get(&self.name) {
+            r.to_vec()
         } else {
-            HashSet::new()
+            Vec::new()
         }
     }
 }
@@ -228,6 +300,8 @@ impl RemoteStore {
             CrdtKind::LWWSet => {
                 AnyReplica::LWWSet(LWWSetReplica::<String>::new(self.hlc.clone(), LWWBias::Add))
             }
+            CrdtKind::ORSet => AnyReplica::ORSet(ORSetReplica::<String>::new()),
+            CrdtKind::RGA => AnyReplica::RGA(RGAReplica::<String>::new(self.hlc.clone())),
         };
 
         let crdt = new_replica.as_any_crdt();
@@ -262,6 +336,8 @@ impl RemoteStore {
             match state.get(name)? {
                 AnyReplica::GCounter(_) => CrdtKind::GCounter,
                 AnyReplica::LWWSet(_) => CrdtKind::LWWSet,
+                AnyReplica::ORSet(_) => CrdtKind::ORSet,
+                AnyReplica::RGA(_) => CrdtKind::RGA,
             }
         };
 
@@ -279,6 +355,16 @@ impl RemoteStore {
                 state,
                 sync_tx,
             }),
+            CrdtKind::ORSet => SharedVariable::Set(SharedSet {
+                name: name.to_string(),
+                state,
+                sync_tx,
+            }),
+            CrdtKind::RGA => SharedVariable::Array(SharedArray {
+                name: name.to_string(),
+                state,
+                sync_tx,
+            }),
         })
     }
 
@@ -291,6 +377,8 @@ impl RemoteStore {
                 let kind = match v {
                     AnyReplica::GCounter(_) => CrdtKind::GCounter,
                     AnyReplica::LWWSet(_) => CrdtKind::LWWSet,
+                    AnyReplica::ORSet(_) => CrdtKind::ORSet,
+                    AnyReplica::RGA(_) => CrdtKind::RGA,
                 };
                 (k.clone(), kind)
             })

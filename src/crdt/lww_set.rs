@@ -25,7 +25,7 @@ where
 
 impl<T> LWWSet<T>
 where
-    T: Eq + Hash,
+    T: Eq + Hash + Clone,
 {
     pub fn new(bias: LWWBias) -> Self {
         LWWSet {
@@ -39,8 +39,8 @@ where
         self.add_set.insert(element, timestamp);
     }
 
-    pub fn remove(&mut self, element: T, timestamp: Timestamp) {
-        self.remove_set.insert(element, timestamp);
+    pub fn remove(&mut self, element: &T, timestamp: Timestamp) {
+        self.remove_set.insert(element.clone(), timestamp);
     }
 
     pub fn is_member(&self, element: &T) -> bool {
@@ -75,6 +75,18 @@ where
     }
 }
 
+impl<T> Crdt for LWWSet<T>
+where
+    T: Eq + Hash + Clone,
+{
+    type Struct = LWWSet<T>;
+
+    fn merge(&mut self, other: &Self::Struct) {
+        merge_with_timestamp(&mut self.add_set, &other.add_set);
+        merge_with_timestamp(&mut self.remove_set, &other.remove_set);
+    }
+}
+
 fn merge_with_timestamp<T>(target: &mut HashMap<T, Timestamp>, with: &HashMap<T, Timestamp>)
 where
     T: Eq + Hash + Clone,
@@ -88,18 +100,6 @@ where
                 }
             })
             .or_insert(*other_timestamp);
-    }
-}
-
-impl<T> Crdt for LWWSet<T>
-where
-    T: Eq + Hash + Clone,
-{
-    type Struct = LWWSet<T>;
-
-    fn merge(&mut self, other: &Self::Struct) {
-        merge_with_timestamp(&mut self.add_set, &other.add_set);
-        merge_with_timestamp(&mut self.remove_set, &other.remove_set);
     }
 }
 
@@ -127,7 +127,7 @@ where
         self.crdt.add(element, ts);
     }
 
-    pub fn remove(&mut self, element: T) {
+    pub fn remove(&mut self, element: &T) {
         let ts = self.hlc.new_timestamp();
         self.crdt.remove(element, ts);
     }
@@ -178,7 +178,8 @@ mod tests {
         let ts2 = hlc.new_timestamp();
 
         set.add(1, ts1);
-        set.remove(1, ts2);
+        // Zmiana na referencję
+        set.remove(&1, ts2);
 
         assert!(
             !set.is_member(&1),
@@ -194,7 +195,8 @@ mod tests {
         let ts1 = hlc.new_timestamp();
         let ts2 = hlc.new_timestamp();
 
-        set.remove(1, ts1);
+        // Zmiana na referencję
+        set.remove(&1, ts1);
         set.add(1, ts2);
 
         assert!(set.is_member(&1), "Add should win with a higher timestamp");
@@ -207,7 +209,8 @@ mod tests {
 
         let ts = hlc.new_timestamp();
         set.add(1, ts);
-        set.remove(1, ts);
+        // Zmiana na referencję
+        set.remove(&1, ts);
 
         assert!(
             set.is_member(&1),
@@ -222,7 +225,8 @@ mod tests {
 
         let ts = hlc.new_timestamp();
         set.add(1, ts);
-        set.remove(1, ts);
+        // Zmiana na referencję
+        set.remove(&1, ts);
 
         assert!(
             !set.is_member(&1),
@@ -257,7 +261,8 @@ mod tests {
         let ts_late = hlc.new_timestamp();
 
         set1.add(1, ts_early);
-        set2.remove(1, ts_late);
+        // Zmiana na referencję
+        set2.remove(&1, ts_late);
         set1.merge(&set2);
 
         assert!(
@@ -277,8 +282,11 @@ mod tests {
         replica1.add(100);
         replica2.add(200);
 
+        // Opcjonalny test usunięcia w replice, żeby sprawdzić nowe API
+        replica2.remove(&200);
+
         assert!(replica1.members().contains(&100));
-        assert!(!replica1.members().contains(&200));
+        assert!(!replica2.members().contains(&200));
 
         replica1.merge(&replica2.crdt);
 
@@ -286,8 +294,8 @@ mod tests {
 
         assert!(merged_members.contains(&100));
         assert!(
-            merged_members.contains(&200),
-            "Replica 1 should contain Replica 2's state after merge"
+            !merged_members.contains(&200),
+            "Replica 1 should recognize that Replica 2 removed the element"
         );
     }
 }

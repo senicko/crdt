@@ -16,6 +16,7 @@ serde = {version = "1.0", features=["derive"]}
 uhlc = "0.8"
 clap = "4.6.1"
 clap-repl = "0.3.2"
+shlex = "2.0.1"
 
 [features]
 default = []
