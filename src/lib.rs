@@ -7,3 +7,4 @@ pub mod server;
 pub mod client;
 
 pub mod crdt;
+pub mod pb;
