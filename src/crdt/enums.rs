@@ -9,7 +9,7 @@ use std::sync::Arc;
 use uhlc::HLC;
 
 // Will be used to serialize/deserialize to correct crdt
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum AnyCrdt {
     GCounter(GCounter),
     LWWSet(LWWSet<String>),
@@ -55,6 +55,13 @@ impl AnyReplica {
         match self {
             AnyReplica::GCounter(replica) => AnyCrdtRef::GCounter(&replica.crdt),
             AnyReplica::LWWSet(replica) => AnyCrdtRef::LWWSet(&replica.crdt),
+        }
+    }
+
+    pub(crate) fn as_any_crdt(&self) -> AnyCrdt {
+        match self {
+            AnyReplica::GCounter(replica) => AnyCrdt::GCounter(replica.crdt.clone()),
+            AnyReplica::LWWSet(replica) => AnyCrdt::LWWSet(replica.crdt.clone()),
         }
     }
 }

@@ -44,11 +44,20 @@ pub enum LWWSetCmd {
     Value,
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Server address to connect to
+    #[arg(short, long, default_value = "http://[::1]:50051")]
+    addr: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let store = RemoteStore::new();
+    let args = Args::parse();
 
-    if let Err(_e) = store.connect("http://[::1]:50051").await {
+    let store = RemoteStore::new();
+    if let Err(_e) = store.connect(&args.addr).await {
         eprintln!("Initial connection failed. You can connect later using the 'Connect' command.");
     }
 
@@ -79,7 +88,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         GlobalCommand::Connect => {
                             if !store.is_connected() {
-                                if let Err(e) = store.connect("http://[::1]:50051").await {
+                                if let Err(e) = store.connect(&args.addr).await {
                                     eprintln!("Connection failed: {:?}", e);
                                 } else {
                                     println!("Connected successfully.");

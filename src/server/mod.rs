@@ -67,7 +67,6 @@ impl crdt_service_server::CrdtService for CrdtService {
         };
 
         let replica = AnyReplica::from_crdt(remote_crdt, self.hlc.clone());
-
         let mut state_map = self.state_map.lock().unwrap();
 
         if state_map.contains_key(&var_name) {
@@ -80,6 +79,7 @@ impl crdt_service_server::CrdtService for CrdtService {
         state_map.insert(var_name.clone(), replica);
 
         let inserted_replica = state_map.get(&var_name).unwrap();
+
         if let Ok(crdt_bytes) = bincode::serialize(&inserted_replica.as_crdt_ref()) {
             let response = InternalSyncResponse {
                 uuid: Uuid::new_v4(), // Generate a server-side event UUID

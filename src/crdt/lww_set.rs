@@ -7,13 +7,13 @@ use std::{
 };
 use uhlc::{HLC, Timestamp};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LWWBias {
     Remove,
     Add,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LWWSet<T>
 where
     T: Eq + Hash,

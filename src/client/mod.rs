@@ -4,10 +4,7 @@ use crate::crdt::{
     g_counter::GCounterReplica,
     lww_set::{LWWBias, LWWSetReplica},
 };
-use crate::pb::{
-    CreateVariableRequest, SyncStreamRequest, SyncStreamResponse,
-    crdt_service_client::CrdtServiceClient,
-};
+use crate::pb::{CreateVariableRequest, SyncStreamRequest, crdt_service_client::CrdtServiceClient};
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
@@ -31,21 +28,20 @@ impl From<tonic::Status> for StoreError {
     }
 }
 
-
 enum SyncCommand {
-    // Forward serialized CRDT bytes to the server outbound stream.
-    Push { name: String, crdt_bytes: Vec<u8> },
-    // Register a new variable with the server via the unary CreateVariable RPC.
+    Push {
+        name: String,
+        crdt: AnyCrdt,
+    },
     Create {
         name: String,
-        crdt_bytes: Vec<u8>,
+        crdt: AnyCrdt,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
 }
 
 type State = Arc<Mutex<HashMap<String, AnyReplica>>>;
 type SyncTx = Arc<Mutex<Option<mpsc::Sender<SyncCommand>>>>;
-
 
 pub enum SharedVariable {
     Counter(SharedCounter),
@@ -61,21 +57,21 @@ pub struct SharedCounter {
 
 impl SharedCounter {
     pub fn inc(&self, delta: u64) {
-        let crdt_bytes = {
+        let crdt = {
             let mut state = self.state.lock().unwrap();
+
             if let Some(AnyReplica::GCounter(replica)) = state.get_mut(&self.name) {
                 replica.inc(delta);
             }
-            state
-                .get(&self.name)
-                .and_then(|r| bincode::serialize(&r.as_crdt_ref()).ok())
+
+            state.get(&self.name).map(|r| r.as_any_crdt())
         };
 
-        if let Some(bytes) = crdt_bytes {
-            if let Some(tx) = self.sync_tx.lock().unwrap().as_ref() {
-                let _ = tx.try_send(SyncCommand::Push {
+        if let Some(crdt) = crdt {
+            if let Some(sync_tx) = self.sync_tx.lock().unwrap().as_ref() {
+                let _ = sync_tx.try_send(SyncCommand::Push {
                     name: self.name.clone(),
-                    crdt_bytes: bytes,
+                    crdt,
                 });
             }
         }
@@ -83,6 +79,7 @@ impl SharedCounter {
 
     pub fn value(&self) -> u64 {
         let state = self.state.lock().unwrap();
+
         if let Some(AnyReplica::GCounter(r)) = state.get(&self.name) {
             r.value()
         } else {
@@ -100,42 +97,42 @@ pub struct SharedSet {
 
 impl SharedSet {
     pub fn add(&self, element: String) {
-        let crdt_bytes = {
+        let crdt = {
             let mut state = self.state.lock().unwrap();
+
             if let Some(AnyReplica::LWWSet(replica)) = state.get_mut(&self.name) {
                 replica.add(element);
             }
-            state
-                .get(&self.name)
-                .and_then(|r| bincode::serialize(&r.as_crdt_ref()).ok())
+
+            state.get(&self.name).map(|r| r.as_any_crdt())
         };
 
-        if let Some(bytes) = crdt_bytes {
-            if let Some(tx) = self.sync_tx.lock().unwrap().as_ref() {
-                let _ = tx.try_send(SyncCommand::Push {
+        if let Some(crdt) = crdt {
+            if let Some(sync_tx) = self.sync_tx.lock().unwrap().as_ref() {
+                let _ = sync_tx.try_send(SyncCommand::Push {
                     name: self.name.clone(),
-                    crdt_bytes: bytes,
+                    crdt,
                 });
             }
         }
     }
 
     pub fn remove(&self, element: String) {
-        let crdt_bytes = {
+        let crdt = {
             let mut state = self.state.lock().unwrap();
+
             if let Some(AnyReplica::LWWSet(replica)) = state.get_mut(&self.name) {
                 replica.remove(element);
             }
-            state
-                .get(&self.name)
-                .and_then(|r| bincode::serialize(&r.as_crdt_ref()).ok())
+
+            state.get(&self.name).map(|r| r.as_any_crdt())
         };
 
-        if let Some(bytes) = crdt_bytes {
-            if let Some(tx) = self.sync_tx.lock().unwrap().as_ref() {
-                let _ = tx.try_send(SyncCommand::Push {
+        if let Some(crdt) = crdt {
+            if let Some(sync_tx) = self.sync_tx.lock().unwrap().as_ref() {
+                let _ = sync_tx.try_send(SyncCommand::Push {
                     name: self.name.clone(),
-                    crdt_bytes: bytes,
+                    crdt,
                 });
             }
         }
@@ -143,6 +140,7 @@ impl SharedSet {
 
     pub fn members(&self) -> HashSet<String> {
         let state = self.state.lock().unwrap();
+
         if let Some(AnyReplica::LWWSet(r)) = state.get(&self.name) {
             r.members()
         } else {
@@ -180,28 +178,22 @@ impl RemoteStore {
 
         let client = CrdtServiceClient::connect(addr.to_string()).await?;
         let (new_tx, sync_rx) = mpsc::channel::<SyncCommand>(32);
-
         *self.sync_tx.lock().unwrap() = Some(new_tx.clone());
 
-        let state = Arc::clone(&self.state);
-        let hlc = Arc::clone(&self.hlc);
-        let handle = tokio::spawn(run_actor(client, sync_rx, state, hlc));
+        let handle = tokio::spawn(run_grpc_actor(client, sync_rx, self.clone()));
         *self.handle.lock().unwrap() = Some(handle);
 
-        let to_flush: Vec<(String, Vec<u8>)> = {
+        let to_flush: Vec<(String, AnyCrdt)> = {
             let state = self.state.lock().unwrap();
+
             state
                 .iter()
-                .filter_map(|(name, replica)| {
-                    bincode::serialize(&replica.as_crdt_ref())
-                        .ok()
-                        .map(|bytes| (name.clone(), bytes))
-                })
+                .map(|(name, replica)| (name.clone(), replica.as_any_crdt()))
                 .collect()
         };
 
-        for (name, crdt_bytes) in to_flush {
-            let _ = new_tx.try_send(SyncCommand::Push { name, crdt_bytes });
+        for (name, crdt) in to_flush {
+            let _ = new_tx.try_send(SyncCommand::Push { name, crdt });
         }
 
         Ok(())
@@ -238,15 +230,15 @@ impl RemoteStore {
             }
         };
 
-        let crdt_bytes = bincode::serialize(&new_replica.as_crdt_ref())
-            .map_err(|_| StoreError::TypeMismatch)?;
-
+        let crdt = new_replica.as_any_crdt();
         let sync_tx = self.sync_tx.lock().unwrap().clone();
+
         if let Some(tx) = sync_tx {
             let (reply_tx, reply_rx) = oneshot::channel();
+
             tx.send(SyncCommand::Create {
                 name: name.to_string(),
-                crdt_bytes,
+                crdt,
                 reply: reply_tx,
             })
             .await
@@ -266,6 +258,7 @@ impl RemoteStore {
     pub fn get(&self, name: &str) -> Option<SharedVariable> {
         let kind = {
             let state = self.state.lock().unwrap();
+
             match state.get(name)? {
                 AnyReplica::GCounter(_) => CrdtKind::GCounter,
                 AnyReplica::LWWSet(_) => CrdtKind::LWWSet,
@@ -291,6 +284,7 @@ impl RemoteStore {
 
     pub fn list(&self) -> Vec<(String, CrdtKind)> {
         let state = self.state.lock().unwrap();
+
         state
             .iter()
             .map(|(k, v)| {
@@ -302,14 +296,31 @@ impl RemoteStore {
             })
             .collect()
     }
+
+    fn merge_received(&self, var_name: String, crdt: AnyCrdt) {
+        let mut state = self.state.lock().unwrap();
+
+        match state.entry(var_name.clone()) {
+            Entry::Occupied(mut o) => {
+                if let Err(crdt) = o.get_mut().merge(crdt) {
+                    eprintln!(
+                        "Type mismatch for {}, replacing with server state",
+                        var_name
+                    );
+                    o.insert(AnyReplica::from_crdt(crdt, self.hlc.clone()));
+                }
+            }
+            Entry::Vacant(v) => {
+                v.insert(AnyReplica::from_crdt(crdt, self.hlc.clone()));
+            }
+        }
+    }
 }
 
-
-async fn run_actor(
+async fn run_grpc_actor(
     mut grpc_client: CrdtServiceClient<Channel>,
     mut sync_rx: mpsc::Receiver<SyncCommand>,
-    state: State,
-    hlc: Arc<HLC>,
+    remote_store: RemoteStore,
 ) {
     let (outbound_tx, outbound_rx) = mpsc::channel::<SyncStreamRequest>(16);
     let outbound_stream = ReceiverStream::new(outbound_rx);
@@ -321,56 +332,48 @@ async fn run_actor(
             return;
         }
     };
+
     let mut inbound = response.into_inner();
 
     loop {
         tokio::select! {
             cmd = sync_rx.recv() => match cmd {
-                Some(SyncCommand::Push { name, crdt_bytes }) => {
-                    let _ = outbound_tx
-                        .send(SyncStreamRequest { var: name, crdt_bytes })
-                        .await;
+                Some(SyncCommand::Push { name, crdt }) => {
+                    if let Ok(crdt_bytes) = bincode::serialize(&crdt) {
+                        let _ = outbound_tx
+                            .send(SyncStreamRequest { var: name, crdt_bytes })
+                            .await;
+                    }
                 }
-                Some(SyncCommand::Create { name, crdt_bytes, reply }) => {
-                    let req = CreateVariableRequest { var: name, crdt_bytes };
-                    let result = grpc_client
-                        .create_variable(req)
-                        .await
-                        .map(|_| ())
-                        .map_err(StoreError::Rpc);
-                    let _ = reply.send(result);
+                Some(SyncCommand::Create { name, crdt, reply }) => {
+                    if let Ok(crdt_bytes) = bincode::serialize(&crdt) {
+                        let req = CreateVariableRequest { var: name, crdt_bytes };
+
+                        let result = grpc_client
+                            .create_variable(req)
+                            .await
+                            .map(|_| ())
+                            .map_err(StoreError::Rpc);
+
+                        let _ = reply.send(result);
+                    } else {
+                        let _ = reply.send(Err(StoreError::TypeMismatch));
+                    }
                 }
                 None => break,
             },
             msg = inbound.next() => match msg {
-                Some(Ok(received)) => merge_received(received, &state, &hlc),
+                Some(Ok(received)) => {
+                    if let Ok(deserialized) = bincode::deserialize::<AnyCrdt>(&received.crdt_bytes) {
+                        remote_store.merge_received(received.var, deserialized);
+                    }
+                }
                 Some(Err(e)) => {
                     eprintln!("Inbound stream error: {}", e);
                     break;
                 }
                 None => break,
             },
-        }
-    }
-}
-
-/// Deserializes a server push and merges it into the shared local state.
-fn merge_received(received: SyncStreamResponse, state: &State, hlc: &Arc<HLC>) {
-    if let Ok(deserialized) = bincode::deserialize::<AnyCrdt>(&received.crdt_bytes) {
-        let mut state = state.lock().unwrap();
-        match state.entry(received.var.clone()) {
-            Entry::Occupied(mut o) => {
-                if let Err(crdt) = o.get_mut().merge(deserialized) {
-                    eprintln!(
-                        "Type mismatch for {}, replacing with server state",
-                        received.var
-                    );
-                    o.insert(AnyReplica::from_crdt(crdt, hlc.clone()));
-                }
-            }
-            Entry::Vacant(v) => {
-                v.insert(AnyReplica::from_crdt(deserialized, hlc.clone()));
-            }
         }
     }
 }
