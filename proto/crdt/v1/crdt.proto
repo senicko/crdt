@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package crdt.v1;
+
+import "google/protobuf/empty.proto";
+
+// message SyncRequest {
+//   bytes crdt_bytes = 1;
+// }
+
+// message SyncResponse {
+//   bytes crdt_bytes = 1;
+// }
+
+// service GCounterService {
+//   rpc Sync(stream SyncRequest) returns (stream SyncResponse);
+// }
+
+/*
+
+   HashMap<String, Crdt>
+
+   rpc CreateVariable(CreateVariableRequest);
+
+*/
+
+message CreateVariableRequest {
+  string var = 1;
+  bytes crdt_bytes = 2;
+}
+
+message SyncStreamRequest {
+  string var = 1;
+  bytes crdt_bytes = 2;
+}
+
+message SyncStreamResponse {
+  string var = 1;
+  bytes crdt_bytes = 2;
+}
+
+service CrdtService {
+  rpc CreateVariable(CreateVariableRequest) returns (google.protobuf.Empty);
+  rpc SyncStream(stream SyncStreamRequest) returns (stream SyncStreamResponse);
+}
