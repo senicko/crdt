@@ -118,7 +118,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         SharedVariable::Set(set) => match LWWSetCmd::try_parse_from(args) {
                             Ok(LWWSetCmd::Add { element }) => set.add(element),
                             Ok(LWWSetCmd::Remove { element }) => set.remove(element),
-                            Ok(LWWSetCmd::Value) => println!("Set Members: {:#?}", set.members()),
+                            Ok(LWWSetCmd::Value) => {
+                                println!("Set Members: {:#?}", set.members())
+                            }
                             Err(e) => {
                                 let _ = e.print();
                             }
